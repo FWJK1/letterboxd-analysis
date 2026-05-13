@@ -1,0 +1,71 @@
+---
+title: Allotax Test 
+author: Fitz Koch
+date: today
+description: Seeing if we can generate prettier allotax with the package.
+format: 
+  html:
+    html-math-method: mathjax
+    fig-responsive: true
+    toc: true
+    toc-location: left
+    theme: cosmo
+    page-layout: full
+  ipynb:
+    wrap: none
+execute: 
+  cache: false 
+editor:
+    render-on-save: true
+bibliography: /home/fitsl/library/zotero/fjk_library.bib
+---
+
+# Setup 
+
+```{python}
+import sys, os
+from pathlib import Path
+
+_project_root = Path.cwd()
+while not (_project_root / "src").exists():
+    _project_root = _project_root.parent
+os.chdir(_project_root)
+```
+
+```{python}
+from pathlib import Path
+import random
+from itertools import product
+
+import srt
+import pandas as pd
+import chardet
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt  
+from py_allotax.generate_svg import generate_svg
+from py_allotax.utils import convert_csv_data
+
+from src.hedonometer import parse_text, import_hedonometer_as_dict
+```
+
+
+```{python}
+# constants
+plt.style.use(["ggplot"])
+IMG_WIDTH = 12
+sns.set_palette("muted")
+```
+
+
+
+```{python}
+generate_svg(
+    "example_data/boys_2022.json",
+    "example_data/boys_2023.json",
+    f"test.pdf",
+    "0.17",
+    "Boys 2022",
+    "Boys 2023"
+)
+```

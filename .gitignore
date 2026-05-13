@@ -6,3 +6,5 @@ src/process_series.py
 src/shifter.py
 src/sliding_window.py
 subtitles/
+Data/large-files
+nltk_data

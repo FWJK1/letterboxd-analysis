@@ -22,7 +22,7 @@ bibliography: /home/fitsl/library/zotero/fjk_library.bib
 
 # Setup 
 
-```{python}
+p```{python}
 import sys, os
 from pathlib import Path
 
@@ -467,3 +467,6 @@ plot_all(
     tf_idf=tf_idf,
 )
 ```
+
+
+Okay, not great, but okay. At any rate, we can turn what we currently have into functions in a `src` package and import them and try them on all the movies in the same place without working through the code. 

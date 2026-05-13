@@ -1,0 +1,336 @@
+---
+title: "Data Engineering"
+author: Fitz Koch
+date: today
+description:  Uses duckdb SQL to setup data tables for NER.
+format: 
+  html:
+    html-math-method: mathjax
+    fig-responsive: true
+    toc: true
+    toc-location: left
+    theme: cosmo
+    page-layout: full
+  ipynb:
+    wrap: none
+execute: 
+  cache: true
+editor:
+    render-on-save: true
+bibliography: /home/fitsl/library/zotero/fjk_library.bib
+---
+
+
+# Setup 
+
+Navigate to root:
+```{python}
+import sys, os
+from pathlib import Path
+
+_project_root = Path.cwd()
+while not (_project_root / "src").exists():
+    _project_root = _project_root.parent
+os.chdir(_project_root)
+```
+
+Set up imports and duckdb connection.
+```{python}
+import duckdb
+import pandas as pd
+import ast
+
+con = duckdb.connect()
+``` 
+
+## Loading data into duckdb
+
+We can convert all our files to parquet from the CSVs. We only have to do this once but it's good for a future reminder. We transfer them to parquet and delete the csvs. 
+
+```{python}
+large_files = Path("Data/large-files")
+for file in large_files.glob("*.csv"):
+    con.execute(f"""
+        COPY (SELECT * FROM read_csv_auto('Data/large-files/{file.stem}.csv')) 
+        TO 'Data/large-files/{file.stem}.parquet' (FORMAT PARQUET)
+    """)
+    file.unlink()
+```
+
+Now we can connect all our parquets to our duckdb. 
+
+```{python}
+for file in large_files.glob("*.parquet"):
+    con.execute(f"CREATE OR REPLACE VIEW {file.stem} AS SELECT * FROM read_parquet('{file}')")
+```
+
+# Data Engineering
+
+Let's take a look at each: 
+```{python}
+meta_sample = con.execute("SELECT * FROM metadata LIMIT 10 ").df()
+print(meta_sample.dtypes)
+meta_sample.head()
+```
+
+```{python}
+review_sample = con.execute("SELECT * FROM reviews LIMIT 10 ").df()
+print(review_sample.dtypes)
+
+review_sample.head()
+```
+
+We don't need the `Movie` column in both tables, and clearly we want the actors, roles, and studio columns to all be lists, so we can literally evaluate them quickly and save them back in (setting the code to not evaluate so it doesn't rerun).
+
+
+```{python}
+meta = con.execute("SELECT * FROM metadata").df()
+
+print(meta["Movie"][0])
+```
+
+
+## Planning
+
+Great, these both make sense. So now we have to think about what we want to do:
+
+1. Clean up the metadata table:
+    * expand the Title column
+    * literal eval the actors, roles, studio column
+    * save as clean_metadata
+2. In movie table,  clean the movie column into just being the title of the movie, remove the other bits, and then explode the movies into stars, reviews, dates, and save this as a new table. 
+
+LATER: 
+3. Then we need to define fuzzy matching, and test it on some reviews to make sure we're satisfied. 
+4. Then run this fuzzy matching function on every row of the data frame. That's more sophisticated then I'm able to do in SQL, certainly, so we'll load it into pandas and do it there
+    * pulling metadata and reviews associated with some rolling set of movie identifiers, probably 
+5. Then if possible we want to figure out the budget. 
+
+### Meta Table
+```{python}
+def split_title(df: pd.DataFrame):
+    # eval lists
+    df["actors"] = df["actors"].apply(ast.literal_eval)
+    df["roles"] = df["roles"].apply(ast.literal_eval)
+    df["studio"] = df["studio"].apply(ast.literal_eval)
+
+    # eval movie dict and split into columns
+    df["Movie"] = df["Movie"].apply(ast.literal_eval)
+    df["Title"] = df["Movie"].apply(lambda x: x.get("title"))
+    df["Title"] = df["Title"].str.replace("-", " ")
+    df["directors"] = df["Movie"].apply(lambda x: x.get("directors"))
+    df["year"] = df["Movie"].apply(lambda x: x.get("year"))
+    df["genres"] = df["Movie"].apply(lambda x: x.get("genres"))
+    df["average_rating"] = df["Movie"].apply(lambda x: x.get("rating"))
+    df["average_rating"] = (
+        df["average_rating"].str.extract(r"(\d+\.?\d*)").astype(float)
+    )
+    df = df.drop(columns="Movie")
+    return df
+
+
+meta_sample = split_title(meta_sample)
+print(meta_sample.dtypes)
+meta_sample.head()
+```
+
+Looks good, so we can run it on the full table, and save it. Note that we have to specify `engine="pyarrow"` for the types to be preserved. 
+
+```{python}
+meta = con.execute("SELECT * FROM metadata").df()
+meta = split_title(meta)
+clean_path = Path("Data/large-files/clean_metadata.parquet")
+meta = meta.drop_duplicates(subset="letterboxd_search")
+meta.to_parquet(clean_path, engine="pyarrow")
+con.execute(f"""
+    CREATE OR REPLACE VIEW clean_metadata AS
+    SELECT * FROM read_parquet('{clean_path}')
+""")
+```
+
+
+Similarly we'll remove duplicates from the reviews table
+
+
+
+
+### Review Table 
+
+First we'll delete the Movie column and use just the title column as an ID (together with the letterboxd_search column). This is flagged as eval false to prevent failure on future loads. 
+
+```{python}
+#|  eval: false
+
+def add_title(df: pd.DataFrame):
+    df["Title"] = df["Movie"].apply(ast.literal_eval).apply(lambda x: x.get("title"))
+    df["Title"] = df["Title"].str.replace("-", " ")
+    df = df.drop(columns="Movie")
+    return df
+
+
+df = con.execute("SELECT * FROM reviews").df()
+df = add_title(df)
+df = df.drop_duplicates(subset="letterboxd_search")
+clean_path = Path("Data/large-files/reviews.parquet")
+df.to_parquet(clean_path)
+con.execute(f"""
+    CREATE OR REPLACE VIEW reviews AS
+    SELECT * FROM read_parquet('{clean_path}')
+""")
+```
+
+Now lets look again at that comments column, which should be a list. We want to make a new row for each entry, I think, with stars, review, and date as separate columns. 
+
+```{python}
+def separate_comments(df):
+    df["comments"] = df["comments"].apply(ast.literal_eval)
+
+    # Leaving: deduplication. actually I think we don't want this. 
+    # df["comments"] = df["comments"].apply(
+    #     lambda x: list({v["review"]: v for v in x}.values())
+    # )
+
+    df = df.explode("comments")
+    df = df.reset_index(drop=True)  # otherwise we get product of number
+    df = df.join(pd.json_normalize(df.pop("comments")))
+    return df
+
+
+df = con.execute("SELECT * FROM reviews LIMIT 10").df()
+df = separate_comments(df)
+df.shape
+```
+
+Great, no title, and exploded correctly. Let' fix the stars while we're at it and covert the date column:
+
+```{python}
+def star_to_score(s):
+    if pd.isna(s):
+        return None
+    stars = s.count("★") + s.count("½") * 0.5
+    return stars * 2
+
+
+def clean_stars_date(df):
+    df["stars"] = df["stars"].apply(star_to_score)
+    df['stars'] /= 2  # to get on same scale as the average in metadata
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    return df
+
+
+df = clean_stars_date(df)
+df.head()
+```
+
+
+So now we'll download the whole view, clean it, push it back to duckdb, and save it as a parquet for future use. There's a *lot* of data here, which is why it's nice to have duckdb in the first place, so let's use it. This takes a while; our operations aren't intuitively vectorizable to me, and there are about 11000 movies. So I'm leaving it as just a visual code block for now. 
+
+```{python}
+chunk_size = 50  # small because we explode
+offset = 0
+chunk_dir = Path("Data/large-files/long_reviews")
+chunk_dir.mkdir(exist_ok=True)
+```
+
+```{python}
+#|  eval: false
+
+while True:
+    df = con.execute(f"SELECT * FROM reviews LIMIT {chunk_size} OFFSET {offset}").df()
+    if len(df) == 0:
+        break
+    df = separate_comments(df)
+    df = clean_stars_date(df)
+    df["chunk_row"] = range(offset, offset + len(df))  # add for later ordering
+    df.to_parquet(chunk_dir / f"chunk_{offset:06d}.parquet", index=False)
+    print(f"Handled offset {offset}")
+    offset += chunk_size
+```
+
+A fun thing about duckdb is that we can just use this folder of chunks as a view we pull stuff from:
+```{python}
+con.execute(f"""
+    CREATE OR REPLACE VIEW long_reviews AS 
+    SELECT * FROM read_parquet('{chunk_dir}/*.parquet')
+""")
+```
+
+
+Now we can take a limited sample and make sure it looks how we want it to:  
+
+```{python}
+con.execute(f"""
+    CREATE OR REPLACE VIEW joined AS 
+    SELECT * FROM long_reviews
+    JOIN 
+        (SELECT letterboxd_search, actors, roles, studio, genres, average_rating, directors, year FROM clean_metadata) AS meta 
+        USING (letterboxd_search)
+    """)
+```
+
+
+```{python}
+df = con.execute("SELECT * FROM joined LIMIT 1000").df()
+df.head()
+```
+Looks great. Data engineered. 
+
+
+We can also easily select only a single movie: 
+```{python}
+s_df= con.execute("""
+    SELECT * FROM long_reviews 
+    WHERE letterboxd_search LIKE '%Summer%Tale%'
+""").df()
+
+for review in s_df['review'][:10]:
+    print(review)
+```
+
+
+```{python}
+dup_reviews = con.execute("""
+    SELECT review, letterboxd_search, COUNT(*)
+    FROM long_reviews
+    WHERE letterboxd_search LIKE '%Summer%Tale%'
+    GROUP BY review, letterboxd_search
+    HAVING COUNT(*) > 1
+""").df()
+dup_reviews.shape
+```
+
+#### Duplicate Check
+
+Let's see how many duplicate reviews we have, just to check:
+```{python}
+dup_reviews = con.execute("""
+    SELECT review, COUNT(*)
+    FROM long_reviews
+    GROUP BY review
+    HAVING COUNT(*) > 1
+""").df()
+dup_reviews.shape
+```
+
+So we definitely have some duplicates of reviews *across* movies (or different instances of the same movies), 
+
+```{python}
+dup_reviews.sort_values(by="count_star()", ascending=False).head(25)
+```
+
+These make sense, but compare to the total number of reviews across all of them
+
+```{python}
+# | eval: false
+df = con.execute("SELECT * FROM joined ").df()
+df.head()
+```
+
+
+```{python}
+13316 / 943987 
+```
+
+So about $ 0.01 $, a little more than $1 \%$ of the reviews are duplicated. And they make sense. 
+
+
