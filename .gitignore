@@ -8,3 +8,4 @@ src/sliding_window.py
 subtitles/
 Data/large-files
 nltk_data
+.tmp
