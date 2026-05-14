@@ -245,7 +245,6 @@ while True:
     df = separate_comments(df)
     df = clean_stars_date(df)
     df = df.drop(columns=["Budget"])
-    df["chunk_row"] = range(offset, offset + len(df))  # add for later ordering
     df.to_parquet(chunk_dir / f"chunk_{offset:06d}.parquet", index=False)
     print(f"Handled offset {offset}")
     offset += chunk_size

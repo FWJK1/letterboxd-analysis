@@ -175,8 +175,8 @@ mv_dir = Path("Data/large-files/ner_reviews")
 mv_dir.mkdir(exist_ok=True, parents=True)
 ```
 
+Rerun to remove the unnecessary chunk col:
 ```{python}
-#| eval: false
 chunk_size = 500
 buffer = []
 
@@ -199,6 +199,18 @@ if buffer:
         mv_dir / f"chunk_{chunk_id + 1:04d}.parquet", index=False
     )
 ```
+
+```{python}
+con.execute("""
+    CREATE OR REPLACE VIEW ner asc
+    SELECT * FROM read_parquet('Data/large-files/ner_reviews/*.parquet')
+""")
+
+ner_df = con.execute("SELECT * FROM ner LIMIT 500").df()
+ner_df.head()
+```
+
+
 
 # Visualization
 
