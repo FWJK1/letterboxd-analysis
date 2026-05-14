@@ -134,6 +134,7 @@ print(meta_sample.dtypes)
 meta_sample.head()
 ```
 
+
 Looks good, so we can run it on the full table, and save it. Note that we have to specify `engine="pyarrow"` for the types to be preserved. 
 
 ```{python}
@@ -141,17 +142,15 @@ meta = con.execute("SELECT * FROM metadata").df()
 meta = split_title(meta)
 clean_path = Path("Data/large-files/clean_metadata.parquet")
 meta = meta.drop_duplicates(subset="letterboxd_search")
-meta.to_parquet(clean_path, engine="pyarrow")
+print(type(meta["actors"].iloc[0]))
+meta.to_parquet(clean_path, engine="pyarrow", index=False)
 con.execute(f"""
     CREATE OR REPLACE VIEW clean_metadata AS
     SELECT * FROM read_parquet('{clean_path}')
 """)
 ```
 
-
 Similarly we'll remove duplicates from the reviews table
-
-
 
 
 ### Review Table 
@@ -185,7 +184,7 @@ Now lets look again at that comments column, which should be a list. We want to 
 def separate_comments(df):
     df["comments"] = df["comments"].apply(ast.literal_eval)
 
-    # Leaving: deduplication. actually I think we don't want this. 
+    # Leaving: deduplication. actually I think we don't want this.
     # df["comments"] = df["comments"].apply(
     #     lambda x: list({v["review"]: v for v in x}.values())
     # )
@@ -193,12 +192,16 @@ def separate_comments(df):
     df = df.explode("comments")
     df = df.reset_index(drop=True)  # otherwise we get product of number
     df = df.join(pd.json_normalize(df.pop("comments")))
+    df = df.reset_index(drop=True)  # otherwise we get product of number
+
     return df
 
 
 df = con.execute("SELECT * FROM reviews LIMIT 10").df()
+df.head()
 df = separate_comments(df)
 df.shape
+df.head()
 ```
 
 Great, no title, and exploded correctly. Let' fix the stars while we're at it and covert the date column:
@@ -223,7 +226,7 @@ df.head()
 ```
 
 
-So now we'll download the whole view, clean it, push it back to duckdb, and save it as a parquet for future use. There's a *lot* of data here, which is why it's nice to have duckdb in the first place, so let's use it. This takes a while; our operations aren't intuitively vectorizable to me, and there are about 11000 movies. So I'm leaving it as just a visual code block for now. 
+So now we'll download the whole view, clean it, push it back to duckdb, and save it as a parquet for future use. There's a *lot* of data here, which is why it's nice to have duckdb in the first place, so let's use it. This takes a while; our operations aren't intuitively vectorizable to me, and there are about 11000 movies. So I'm leaving it as just a visual code block for now.  I'll also drop the budget because I don't really trust it. 
 
 ```{python}
 chunk_size = 50  # small because we explode
@@ -241,6 +244,7 @@ while True:
         break
     df = separate_comments(df)
     df = clean_stars_date(df)
+    df = df.drop(columns=["Budget"])
     df["chunk_row"] = range(offset, offset + len(df))  # add for later ordering
     df.to_parquet(chunk_dir / f"chunk_{offset:06d}.parquet", index=False)
     print(f"Handled offset {offset}")
@@ -318,15 +322,8 @@ So we definitely have some duplicates of reviews *across* movies (or different i
 dup_reviews.sort_values(by="count_star()", ascending=False).head(25)
 ```
 
-These make sense, but compare to the total number of reviews across all of them
 
-```{python}
-# | eval: false
-df = con.execute("SELECT * FROM joined ").df()
-df.head()
-```
-
-
+Compare to the total number of reviews we have: 
 ```{python}
 13316 / 943987 
 ```

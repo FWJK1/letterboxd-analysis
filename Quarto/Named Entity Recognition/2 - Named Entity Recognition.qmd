@@ -41,8 +41,11 @@ import pandas as pd
 from rapidfuzz import fuzz, process
 from rapidfuzz.process import cdist
 from rapidfuzz.fuzz import WRatio
+from rapidfuzz.distance import DamerauLevenshtein as DL
 
-from src.NER_Matching import split_review, extract_words_from_reviews
+
+# project imports
+from src.NER_Matching import split_names, get_vocab, NER_pipeline
 
 con = duckdb.connect()
 ``` 
@@ -62,48 +65,52 @@ con.execute(f"""
 """)
 ```
 
+Grab the first df. 
 ```{python}
-con.execute(f"""
-    CREATE OR REPLACE VIEW joined AS 
-    SELECT * FROM long_reviews
-    JOIN 
-        (SELECT letterboxd_search, actors, roles, studio, genres, average_rating, directors, year FROM clean_metadata) AS meta 
-        USING (letterboxd_search)
-    """)
+def get_movie(letterboxd_search):
+    return con.execute("""
+        SELECT * FROM long_reviews
+        WHERE letterboxd_search = ?
+    """, [letterboxd_search]).df()
+
+movies = con.execute("""
+    SELECT letterboxd_search FROM clean_metadata 
+""").df()["letterboxd_search"]
+df = get_movie(movies[0])
+df
 ```
+
+```{python}
+def get_metadata(letterboxd_search):
+    return con.execute("""
+    SELECT * FROM clean_metadata 
+    WHERE letterboxd_search = ?
+    """, [letterboxd_search]).df()
+
+metadata = get_metadata(movies[0])
+metadata
+```
+
+
 
 # NER
 
 ## Planning 
 1. Define fuzzy matching, and test it on some reviews to make sure we're satisfied. 
+    1. Get all the individual words from all the reviews for a given df (a set)
+    2. For every word in that set, match it against all the different NER groups built from the metadata to build a dictionary word -> [PLACEHOLDER]
+        * actors
+        * roles
+        * directors
+        * studios
+        * genres
+        * genre words (a dictionary we'll build by hand)
+    3. Iterate over all the reviews for a df, and map each word by this. 
 2. . Then run this fuzzy matching function on every row of the data frame. That's more sophisticated then I'm able to do in SQL, certainly, so we'll load it into pandas and do it there
 3. Then if possible we want to figure out the budget. 
 4. visualizations! (allotax, ranked list, etc.)
 
-```{python}
-try: 
-    del(df)
-    df = con.execute("SELECT * FROM joined").df()
-    df.shape
-except:
-    df = con.execute("SELECT * FROM joined").df()
-    df.shape
-```
 
-Great, looks good, and same on repeats.
-
-
-Now, the way that the NER should work:
-
-1. Get all the individual words from all the reviews for a given movie (a set)
-2. For every word in that set, match it against all the different NER groups built from the metadata to build a dictionary word -> [PLACEHOLDER]
-    * actors
-    * roles
-    * directors
-    * studios
-    * genres
-    * genre words (a dictionary we'll build by hand)
-3. Iterate over all the reviews for a movie, and map each word by this. 
 
 Then we need to get words to compare to. I don't like having nltk at root, so I just moved it around like this. 
 ```{python}
@@ -112,29 +119,63 @@ with open(words_file, "r") as f:
     english_words = set(f.read().splitlines())
 ```
 
-
-```{python}
-df.head() 
-```
-
-So first we need to get all the reviews for a given movie and turn them into a giant set of words:
+First we need to get all the reviews for a given df and turn them into a giant set of words. 
 
 ```{python} 
-small_df = con.execute("SELECT * FROM joined LIMIT 1200").df()
-words = small_df[small_df['Title'] == 'a fish called wanda']["review"]
-words
+from collections import defaultdict
+
+vocab = get_vocab(df["review"])
+actors = split_names(metadata["actors"].explode())
+
+fuzzy_match_map = defaultdict(list)
+for actor in list(actors):
+    matches = process.extract(actor, vocab, scorer=fuzz.ratio, score_cutoff=70)
+    for match, score, index in matches:
+        fuzzy_match_map[actor].append((match, score))
+print(fuzzy_match_map)
+```
+
+```{python}
+fuzzy_match_map = defaultdict(list)
+for actor in list(actors):
+    threshold = max(0.85, 1.0 - 0.01 * len(actor))
+    print(actor, threshold)
+    matches = process.extract(
+        actor, vocab, scorer=DL.normalized_similarity, score_cutoff=threshold
+    )
+    for match, score, index in matches:
+        fuzzy_match_map[actor].append((match, score))
+print(fuzzy_match_map)
+```
+
+This is a question of false positives; I think scaling by how long the word is makes sense. Anyway, we wrap this basic logic up as a loop over all the names from the metadata and we get the following:
 
 
+```{python}
+metadata.columns
+n_df = df.copy()
+n_df["ner_review"] = NER_pipeline(df, metadata)
+n_df[["review", "ner_review"]].to_csv("scratch.csv")
+n_df.to_csv("scratch.csv")
 ```
 
 
 ```{python}
-def add_fuzzy_matches(names, vocabulary, placeholder, threshold=90, verbose=None):ns
-    vocab_list = list(vocabulary)
-    scores = cdist(names, vocab_list, scorer=WRatio, score_cutoff=threshold)
-    fuzzy_match_map = defaultdict(list)
-    for i, name in enumerate(names):
-        for j in scores[i].nonzero()[0]:
-            fuzzy_match_map[vocab_list[j].lower()].append(placeholder)
-    return fuzzy_match_map
+num = 3
+n_df, metadata = get_movie(movies[num]), get_metadata(movies[num])
+n_df["ner_review"] = NER_pipeline(n_df, metadata)
+n_df[["review", "ner_review"]].to_csv("scratch.csv")
+n_df.head()
+```
+
+
+
+```{python}
+mv_dir = Path("Data/large-files/ner_reviews")
+mv_dir.mkdir(exist_ok=True, parents=True)
+for i, movie in enumerate(movies):
+    n_df, metadata = get_movie(movie), get_metadata(movie)
+    n_df["ner_review"] = NER_pipeline(n_df, metadata)
+    n_df.to_parquet(mv_dir / f"{i}.parquet", index=False)
+    print(i)
 ```
