@@ -173,9 +173,36 @@ n_df.head()
 ```{python}
 mv_dir = Path("Data/large-files/ner_reviews")
 mv_dir.mkdir(exist_ok=True, parents=True)
+```
+
+```{python}
+#| eval: false
+chunk_size = 500
+buffer = []
+
 for i, movie in enumerate(movies):
     n_df, metadata = get_movie(movie), get_metadata(movie)
     n_df["ner_review"] = NER_pipeline(n_df, metadata)
-    n_df.to_parquet(mv_dir / f"{i}.parquet", index=False)
-    print(i)
+    buffer.append(n_df)
+
+    if len(buffer) == chunk_size:
+        chunk_id = i // chunk_size
+        pd.concat(buffer).to_parquet(
+            mv_dir / f"chunk_{chunk_id:04d}.parquet", index=False
+        )
+        buffer = []
+        print(f"Saved chunk {chunk_id}")
+
+# flush remainder
+if buffer:
+    pd.concat(buffer).to_parquet(
+        mv_dir / f"chunk_{chunk_id + 1:04d}.parquet", index=False
+    )
+```
+
+# Visualization
+
+
+```{python}
+
 ```
